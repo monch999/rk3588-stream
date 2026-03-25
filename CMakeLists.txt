@@ -83,6 +83,32 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pthread
 )
 
+# ==================== 多源推流可执行文件 ====================
+set(MULTI_STREAM_SOURCES
+    src/multi_stream_main.cpp
+    src/channel_pipeline.cpp
+    src/videofile.cpp
+    src/image_process.cpp
+    src/yolov8.cpp
+    src/postprocess.cpp
+)
+
+add_executable(multi_stream ${MULTI_STREAM_SOURCES})
+
+target_include_directories(multi_stream PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${RKNN_INCLUDE_DIR}
+    ${RGA_INCLUDE_DIR}
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(multi_stream PRIVATE
+    ${RKNN_LIB}
+    ${RGA_LIB}
+    ${OpenCV_LIBS}
+    pthread
+)
+
 # ==================== 打印配置 ====================
 message(STATUS "RKNN include: ${RKNN_INCLUDE_DIR}")
 message(STATUS "RKNN lib:     ${RKNN_LIB}")
