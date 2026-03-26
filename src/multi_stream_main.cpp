@@ -30,6 +30,10 @@ void print_usage(const char *prog) {
     "  推流配置:\n"
     "    --rtsp-base <URL>         RTSP 基地址 (默认: rtsp://127.0.0.1:8554)\n"
     "    --bitrate <rate>          码率 (默认: 4M)\n"
+    "    --stream-mode <mode>      推流模式: raw / processed / both (默认: both)\n"
+    "                                raw:       仅推原始流，不进行算法处理\n"
+    "                                processed: 仅推处理后的流\n"
+    "                                both:      同时推原始流和处理后的流\n"
     "\n"
     "  通用选项:\n"
     "    --loop                    视频循环播放\n"
@@ -54,6 +58,7 @@ int main(int argc, char *argv[]) {
   int  npu_cores     = 3;
   std::string rtsp_base = "rtsp://127.0.0.1:8554";
   std::string bitrate   = "4M";
+  std::string stream_mode = "both";  // raw / processed / both
   bool loop_video       = false;
   bool enable_display   = true;
 
@@ -73,6 +78,7 @@ int main(int argc, char *argv[]) {
     else if (opt == "--npu-cores")     npu_cores = std::stoi(val);
     else if (opt == "--rtsp-base")     rtsp_base = val;
     else if (opt == "--bitrate")       bitrate   = val;
+    else if (opt == "--stream-mode")  stream_mode = val;
     else { fprintf(stderr, "未知选项: %s\n", opt.c_str()); return 1; }
   }
 
@@ -82,8 +88,19 @@ int main(int argc, char *argv[]) {
     print_usage(argv[0]);
     return 1;
   }
-  if (!rgb_input.empty() && (model_path.empty() || label_path.empty())) {
-    fprintf(stderr, "错误: RGB 通道需要指定 -m <model> -l <labels>\n");
+  if (stream_mode != "raw" && stream_mode != "processed" &&
+      stream_mode != "both") {
+    fprintf(stderr, "错误: --stream-mode 必须是 raw, processed 或 both\n");
+    return 1;
+  }
+
+  bool enable_raw       = (stream_mode == "raw"  || stream_mode == "both");
+  bool enable_processed = (stream_mode == "processed" || stream_mode == "both");
+
+  // RGB 通道的处理需要模型 (仅当推处理流时)
+  if (!rgb_input.empty() && enable_processed &&
+      (model_path.empty() || label_path.empty())) {
+    fprintf(stderr, "错误: RGB 通道推处理流需要指定 -m <model> -l <labels>\n");
     return 1;
   }
 
@@ -103,8 +120,8 @@ int main(int argc, char *argv[]) {
 
   // ---- RGB 通道 ----
   if (!rgb_input.empty()) {
-    // 先创建临时 VideoFile 获取分辨率（用于初始化 YoloProcessor）
-    {
+    // 仅当需要处理流时初始化 YOLO 处理器
+    if (enable_processed) {
       VideoFile probe(rgb_input);
       YoloProcessor::Config ycfg;
       ycfg.model_path      = model_path;
@@ -112,7 +129,8 @@ int main(int argc, char *argv[]) {
       ycfg.num_cores       = npu_cores;
       ycfg.frame_w         = probe.get_frame_width();
       ycfg.frame_h         = probe.get_frame_height();
-      ycfg.model_input_size = 640;
+      ycfg.model_input_w   = 640;
+      ycfg.model_input_h   = 384;
       yolo_proc = std::make_unique<YoloProcessor>(ycfg);
       if (!yolo_proc->Init()) {
         fprintf(stderr, "[ERROR] YoloProcessor init failed\n");
@@ -129,6 +147,8 @@ int main(int argc, char *argv[]) {
     cfg.processed_rtsp_url = rtsp_base + "/rgb_yolo";
     cfg.bitrate            = bitrate;
     cfg.loop_video         = loop_video;
+    cfg.enable_raw         = enable_raw;
+    cfg.enable_processed   = enable_processed;
     cfg.clock              = &clock;
     cfg.processor          = yolo_proc.get();
 
@@ -137,10 +157,12 @@ int main(int argc, char *argv[]) {
 
   // ---- 多光谱通道 ----
   if (!ms_input.empty()) {
-    ndvi_proc = std::make_unique<NdviProcessor>();
-    if (!ndvi_proc->Init()) {
-      fprintf(stderr, "[ERROR] NdviProcessor init failed\n");
-      return 1;
+    if (enable_processed) {
+      ndvi_proc = std::make_unique<NdviProcessor>();
+      if (!ndvi_proc->Init()) {
+        fprintf(stderr, "[ERROR] NdviProcessor init failed\n");
+        return 1;
+      }
     }
 
     ChannelPipeline::Config cfg;
@@ -152,6 +174,8 @@ int main(int argc, char *argv[]) {
     cfg.processed_rtsp_url = rtsp_base + "/ms_ndvi";
     cfg.bitrate            = bitrate;
     cfg.loop_video         = loop_video;
+    cfg.enable_raw         = enable_raw;
+    cfg.enable_processed   = enable_processed;
     cfg.clock              = &clock;
     cfg.processor          = ndvi_proc.get();
 
@@ -160,10 +184,12 @@ int main(int argc, char *argv[]) {
 
   // ---- 热红外通道 ----
   if (!thermal_input.empty()) {
-    fire_proc = std::make_unique<FireDetector>();
-    if (!fire_proc->Init()) {
-      fprintf(stderr, "[ERROR] FireDetector init failed\n");
-      return 1;
+    if (enable_processed) {
+      fire_proc = std::make_unique<FireDetector>();
+      if (!fire_proc->Init()) {
+        fprintf(stderr, "[ERROR] FireDetector init failed\n");
+        return 1;
+      }
     }
 
     ChannelPipeline::Config cfg;
@@ -175,6 +201,8 @@ int main(int argc, char *argv[]) {
     cfg.processed_rtsp_url = rtsp_base + "/thermal_fire";
     cfg.bitrate            = bitrate;
     cfg.loop_video         = loop_video;
+    cfg.enable_raw         = enable_raw;
+    cfg.enable_processed   = enable_processed;
     cfg.clock              = &clock;
     cfg.processor          = fire_proc.get();
 
@@ -188,10 +216,14 @@ int main(int argc, char *argv[]) {
   for (auto &ch : channels)
     ch->Start();
 
+  size_t n_raw  = enable_raw       ? channels.size() : 0;
+  size_t n_proc = enable_processed ? channels.size() : 0;
+
   printf("\n===== Multi-Stream Pipeline Running =====\n");
-  printf("  Channels: %zu\n", channels.size());
-  printf("  Streams:  %zu raw + %zu processed = %zu total\n",
-         channels.size(), channels.size(), channels.size() * 2);
+  printf("  Channels:    %zu\n", channels.size());
+  printf("  Stream mode: %s\n", stream_mode.c_str());
+  printf("  Streams:     %zu raw + %zu processed = %zu total\n",
+         n_raw, n_proc, n_raw + n_proc);
   printf("  Clock epoch: monotonic (steady_clock)\n");
   printf("  Press Ctrl+C to stop\n\n");
 

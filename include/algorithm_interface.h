@@ -42,7 +42,8 @@ public:
     int  num_cores        = 3;    // NPU 核心数
     int  frame_w          = 0;    // 视频帧宽（Init 前必须设置）
     int  frame_h          = 0;    // 视频帧高
-    int  model_input_size = 640;
+    int  model_input_w    = 640;  // 模型输入宽
+    int  model_input_h    = 384;  // 模型输入高
   };
 
   explicit YoloProcessor(const Config &cfg) : cfg_(cfg) {}
@@ -56,7 +57,7 @@ public:
       models_.push_back(
           std::make_shared<Yolov8>(std::string(cfg_.model_path)));
       image_processors_.push_back(std::make_unique<ImageProcess>(
-          cfg_.frame_w, cfg_.frame_h, cfg_.model_input_size, 30.0f));
+          cfg_.frame_w, cfg_.frame_h, cfg_.model_input_w, cfg_.model_input_h));
     }
 
     // 初始化 RKNN 模型（第一个完整加载，后续共享权重）
@@ -67,8 +68,9 @@ public:
       }
     }
 
-    printf("[YOLO  ] Init OK: %d NPU cores, input %dx%d -> %d\n",
-           cfg_.num_cores, cfg_.frame_w, cfg_.frame_h, cfg_.model_input_size);
+    printf("[YOLO  ] Init OK: %d NPU cores, input %dx%d -> %dx%d\n",
+           cfg_.num_cores, cfg_.frame_w, cfg_.frame_h,
+           cfg_.model_input_w, cfg_.model_input_h);
     return true;
   }
 

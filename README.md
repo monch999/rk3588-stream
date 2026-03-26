@@ -1,27 +1,33 @@
-# RK3588 YOLO 视频推理并使用FFMPEG推流
+# RK3588 YOLO 视频推理与多源推流
 
-基于 RK3588 NPU 的多线程 YOLO 目标检测。
+基于 RK3588 NPU 的多线程 YOLO 目标检测与多源视频推流系统。
 
 ## 项目结构
 
 ```
-rk3588_yolo/
+rk3588-stream/
 ├── CMakeLists.txt
 ├── include/
-│   ├── utils.h           # 替代 kaylordut（日志/计时/run_once_with_delay）
-│   ├── threadpool.h      # 线程池
-│   ├── postprocess.h     # 后处理结构体定义
-│   ├── videofile.h
-│   ├── image_process.h
-│   ├── yolov8.h
-│   └── rknn_pool.h
+│   ├── utils.h                # 日志/计时/run_once_with_delay
+│   ├── bounded_queue.h        # 线程安全有界队列
+│   ├── postprocess.h          # 后处理结构体定义
+│   ├── videofile.h            # 视频文件读取
+│   ├── image_process.h        # RGA 硬件加速图像处理
+│   ├── yolov8.h               # RKNN 模型封装
+│   ├── pipeline.h             # 单路 YOLO 推理流水线
+│   ├── shared_clock.h         # 多通道统一时间基准 (monotonic clock)
+│   ├── ffmpeg_streamer.h      # FFmpeg 管道推流器
+│   ├── algorithm_interface.h  # 算法处理器接口 (YOLO/NDVI/火点检测)
+│   └── channel_pipeline.h     # 单通道推流流水线
 └── src/
-    ├── main.cpp           # 主程序入口
+    ├── main.cpp               # 单路 YOLO 推流入口
+    ├── multi_stream_main.cpp  # 三路多源推流入口
+    ├── pipeline.cpp           # 单路流水线实现
+    ├── channel_pipeline.cpp   # 多源通道流水线实现
     ├── videofile.cpp
     ├── image_process.cpp
     ├── yolov8.cpp
-    ├── rknn_pool.cpp
-    └── postprocess.cpp    # 后处理
+    └── postprocess.cpp
 ```
 
 ## 依赖
@@ -30,9 +36,12 @@ rk3588_yolo/
 | ----------------- | -------------------------------------------------------------- |
 | RKNN SDK (rknpu2) | 包含 `rknn_api.h`、`rknn_matmul_api.h`、`Float16.h`、`librknnrt.so` |
 | OpenCV 4.x        | 图像处理与显示                                                        |
-| LIBRGA            | rk3588专用加速图像处理                                                 |
+| LIBRGA            | RK3588 专用 2D 硬件加速                                              |
+| FFmpeg            | 视频编码与 RTSP/RTMP 推流（需支持 `h264_rkmpp` 硬件编码器）                     |
 
-## 编译（在 RK3588 板子上原生编译）
+## 编译
+
+### 在 RK3588 板子上原生编译
 
 ```bash
 mkdir build && cd build
@@ -40,7 +49,11 @@ cmake ..
 make -j4
 ```
 
-## 交叉编译
+编译产物：
+- `rk3588_yolo_detect` — 单路 YOLO 推理推流
+- `multi_stream` — 三路多源推流
+
+### 交叉编译
 
 ```bash
 mkdir build && cd build
@@ -51,19 +64,26 @@ cmake .. \
 make -j$(nproc)
 ```
 
-## 运行
+---
+
+## 一、单路 YOLO 推流 (`rk3588_yolo_detect`)
+
+原有功能，单路视频 YOLO 推理 + RTSP/RTMP 推流。
+
+### 运行
 
 ```bash
-#先进入miediamtx文件夹，运行客户端
+# 先启动 mediamtx RTSP 服务器
 ./mediamtx
+
 ./rk3588_yolo_detect \
   -m ../model/yolov8n.rknn \
-  -l ../model/coco_80_labels.txt \
+  -l ../model/coco_80_labels_list.txt \
   -i ../data/test.mp4 \
-  -t 3 \
-  -f 30 \
-  --proto rtmp
+  -t 3 -f 30 --proto rtsp
 ```
+
+### 参数
 
 | 参数             | 说明                        | 默认值                          |
 |:-------------- |:-------------------------:|:---------------------------- |
@@ -72,21 +92,114 @@ make -j$(nproc)
 | `-i`           | 输入视频路径                    | 必填                           |
 | `-t`           | 推理线程数（建议 3，对应 3 个 NPU 核心） | 3                            |
 | `-f`           | 播放帧率                      | 30                           |
-| `-proto`       | 选择推流协议                    | rtsp                         |
-| `-rtsp`        | rtsp地址                    | rtsp://127.0.0.1:8554/stream |
-| `-rtmp`        | rtmp地址                    | rtmp://127.0.0.1:1935/stream |
+| `-n`           | 每 N 帧推理一次                 | 3                            |
+| `--proto`      | 推流协议 (rtsp/rtmp/both)     | rtsp                         |
+| `--rtsp`       | RTSP 地址                   | rtsp://127.0.0.1:8554/stream |
+| `--rtmp`       | RTMP 地址                   | rtmp://127.0.0.1:1935/stream |
 | `--bitrate`    | 码率                        | 4M                           |
 | `--no-display` | 不显示本地窗口                   |                              |
+| `--loop`       | 视频循环播放                    |                              |
+
+---
+
+## 二、三路多源推流 (`multi_stream`)
+
+三路独立视频通道（RGB、多光谱、热红外），每路独立采集、处理、推流。
+
+### 架构
+
+```
+SharedClock (monotonic epoch) ─────────────────────────────────
+     │                         │                         │
+ ChannelPipeline            ChannelPipeline           ChannelPipeline
+ [RGB]                      [多光谱]                  [热红外]
+     │                         │                         │
+ Reader(30fps)              Reader(60fps)             Reader(30fps)
+   ├→ RawWriter               ├→ RawWriter               ├→ RawWriter
+   │  → /rgb_raw              │  → /ms_raw               │  → /thermal_raw
+   │                          │                          │
+   └→ YoloProcessor(×3NPU)   └→ NdviProcessor(stub)     └→ FireDetector(stub)
+      → /rgb_yolo (15fps)       → /ms_ndvi (30fps)         → /thermal_fire (30fps)
+```
+
+### 关键特性
+
+- **PTS 时间对齐**：所有通道共享 `steady_clock` epoch，PTS = epoch + seq × (1e9/fps)，不做帧级同步
+- **独立帧率**：RGB 原始 30fps / 推理 15fps，多光谱原始 60fps / 处理 30fps，热红外 30fps / 30fps
+- **多核 NPU 推理**：RGB YOLO 使用 3 个 NPU 核心并行推理，ProcessWorker 多线程 + 重排序缓冲
+- **算法接口预留**：`NdviProcessor`（植被指数）和 `FireDetector`（火点检测）为 stub 实现，接口已定义
+
+### 运行
+
+```bash
+# 先启动 mediamtx RTSP 服务器
+./mediamtx
+
+./multi_stream \
+  --rgb-input ../data/rgb_4k.mp4 \
+  --ms-input ../data/multispectral.mp4 \
+  --thermal-input ../data/thermal_640x512.mp4 \
+  -m ../model/yolov8n.rknn \
+  -l ../model/coco_80_labels_list.txt \
+  --npu-cores 3 \
+  --loop
+```
+
+### 参数
+
+| 参数                | 说明                    | 默认值                      |
+|:------------------ |:---------------------:|:-------------------------- |
+| `--rgb-input`      | RGB 视频文件 (4K, 30fps)  | 可选                        |
+| `--ms-input`       | 多光谱视频文件 (60fps)       | 可选                        |
+| `--thermal-input`  | 热红外视频文件 (640×512)     | 可选                        |
+| `-m, --model`      | RKNN 模型文件             | RGB 通道必填                  |
+| `-l, --labels`     | 标签文件                  | RGB 通道必填                  |
+| `--npu-cores`      | NPU 核心数               | 3                          |
+| `--rtsp-base`      | RTSP 基地址              | rtsp://127.0.0.1:8554      |
+| `--bitrate`        | 码率                    | 4M                         |
+| `--loop`           | 视频循环播放                |                            |
+| `--no-display`     | 不显示本地窗口               |                            |
+
+### 推流地址
+
+| 流名称            | URL                                   | 帧率    | 内容         |
+|:---------------- |:------------------------------------- |:------ |:----------- |
+| RGB 原始流        | `rtsp://127.0.0.1:8554/rgb_raw`      | 30fps  | 原始 4K 视频  |
+| RGB YOLO 推理流   | `rtsp://127.0.0.1:8554/rgb_yolo`     | 15fps  | YOLO 检测结果 |
+| 多光谱原始流       | `rtsp://127.0.0.1:8554/ms_raw`       | 60fps  | 原始多光谱视频 |
+| 多光谱植被指数流    | `rtsp://127.0.0.1:8554/ms_ndvi`      | 30fps  | 植被指数结果   |
+| 热红外原始流       | `rtsp://127.0.0.1:8554/thermal_raw`  | 30fps  | 原始热红外视频 |
+| 热红外火点检测流    | `rtsp://127.0.0.1:8554/thermal_fire` | 30fps  | 火点检测结果   |
+
+### 算法接口说明
+
+三个处理器均实现 `IFrameProcessor` 接口：
+
+```cpp
+class IFrameProcessor {
+public:
+  virtual bool Init() = 0;
+  virtual bool Process(int worker_id, const cv::Mat &input, cv::Mat &output) = 0;
+  virtual std::string Name() const = 0;
+  virtual int NumWorkers() const { return 1; }
+};
+```
+
+- **YoloProcessor**：已实现，封装 Yolov8 + ImageProcess + 多 NPU 核心
+- **NdviProcessor**：stub，预留 6 通道多光谱植被指数计算接口
+- **FireDetector**：stub，预留热红外火点检测接口
+
+---
 
 ## 支持的模型类型
 
-程序会自动识别模型类型：
+程序自动识别模型类型：
 
 - **YOLOv8 Detection** — 标准目标检测
-- **YOLOv8 Segment** — 实例分割（输出 13 个 tensor）
+- **YOLOv8 Segment** — 实例分割
 - **YOLOv8 OBB** — 旋转框检测
 - **YOLOv8 Pose** — 姿态估计
-- **YOLOv10 Detection** — v10 检测
+- **YOLOv10 Detection** — YOLOv10 检测
 
 ## 如需日志输出
 

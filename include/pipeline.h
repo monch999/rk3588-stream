@@ -54,7 +54,8 @@ public:
     std::string input_file;
     int    infer_threads    = 3;
     int    infer_interval   = 15;    // 每N帧推理一次
-    int    model_input_size = 640;
+    int    model_input_w    = 640;   // 模型输入宽
+    int    model_input_h    = 384;   // 模型输入高
     double framerate        = 30.0;
     bool   loop_video       = false;
   };

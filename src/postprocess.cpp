@@ -840,19 +840,19 @@ int post_process_seg(rknn_app_context_t *app_ctx, rknn_output *outputs,
     cls_id[i] = od_results->results[i].cls_id;
 
     // get real box
-    // 这里是把640x640的坐标映射返回到原始输入图像的坐标
+    // 将模型坐标映射回原始输入图像坐标 (scale_w / scale_h 独立缩放)
     od_results->results[i].box.left =
         box_reverse(od_results->results[i].box.left, model_in_w,
-                    letter_box->x_pad, letter_box->scale);
+                    letter_box->x_pad, letter_box->scale_w);
     od_results->results[i].box.top =
         box_reverse(od_results->results[i].box.top, model_in_h,
-                    letter_box->y_pad, letter_box->scale);
+                    letter_box->y_pad, letter_box->scale_h);
     od_results->results[i].box.right =
         box_reverse(od_results->results[i].box.right, model_in_w,
-                    letter_box->x_pad, letter_box->scale);
+                    letter_box->x_pad, letter_box->scale_w);
     od_results->results[i].box.bottom =
         box_reverse(od_results->results[i].box.bottom, model_in_h,
-                    letter_box->y_pad, letter_box->scale);
+                    letter_box->y_pad, letter_box->scale_h);
   }
 
   // crop seg outside box
@@ -864,10 +864,10 @@ int post_process_seg(rknn_app_context_t *app_ctx, rknn_output *outputs,
   // get real mask
   int cropped_height = PROTO_HEIGHT - letter_box->y_pad / 4 * 2;
   int cropped_width = PROTO_WEIGHT - letter_box->x_pad / 4 * 2;
-  int y_pad = letter_box->y_pad / 4;  // 640 / 160 = 4
+  int y_pad = letter_box->y_pad / 4;
   int x_pad = letter_box->x_pad / 4;
-  int ori_in_height = (model_in_h - letter_box->y_pad * 2) / letter_box->scale;
-  int ori_in_width = (model_in_w - letter_box->x_pad * 2) / letter_box->scale;
+  int ori_in_height = (int)((model_in_h - letter_box->y_pad * 2) / letter_box->scale_h);
+  int ori_in_width  = (int)((model_in_w - letter_box->x_pad * 2) / letter_box->scale_w);
   uint8_t *cropped_seg_mask =
       (uint8_t *)malloc(cropped_height * cropped_width * sizeof(uint8_t));
   uint8_t *real_seg_mask =
@@ -1304,19 +1304,19 @@ int post_process_pose(rknn_app_context_t *app_ctx, rknn_output *outputs,
     float obj_conf = objProbs[i];
 
     od_results->results[last_count].box.left =
-        (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
+        (int)(clamp(x1, 0, model_in_w) / letter_box->scale_w);
     od_results->results[last_count].box.top =
-        (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
+        (int)(clamp(y1, 0, model_in_h) / letter_box->scale_h);
     od_results->results[last_count].box.right =
-        (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
+        (int)(clamp(x2, 0, model_in_w) / letter_box->scale_w);
     od_results->results[last_count].box.bottom =
-        (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+        (int)(clamp(y2, 0, model_in_h) / letter_box->scale_h);
     od_results->results[last_count].prop = obj_conf;
     for (int j = 0; j < 34; j = j + 2) {
       auto kpt_x = kpt.at(34 * n + j) - letter_box->x_pad;
       auto kpt_y = kpt.at(34 * n + j + 1) - letter_box->y_pad;
-      kpt_x /= letter_box->scale;
-      kpt_y /= letter_box->scale;
+      kpt_x /= letter_box->scale_w;
+      kpt_y /= letter_box->scale_h;
       od_results->results_pose[last_count].kpt[j] = kpt_x;
       od_results->results_pose[last_count].kpt[j + 1] = kpt_y;
       od_results->results_pose[last_count].visibility[j / 2] =
@@ -1384,13 +1384,13 @@ int post_process_v10_detection(rknn_app_context_t *app_ctx,
     float obj_conf = objProbs[i];
 
     od_results->results[last_count].box.left =
-        (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
+        (int)(clamp(x1, 0, model_in_w) / letter_box->scale_w);
     od_results->results[last_count].box.top =
-        (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
+        (int)(clamp(y1, 0, model_in_h) / letter_box->scale_h);
     od_results->results[last_count].box.right =
-        (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
+        (int)(clamp(x2, 0, model_in_w) / letter_box->scale_w);
     od_results->results[last_count].box.bottom =
-        (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+        (int)(clamp(y2, 0, model_in_h) / letter_box->scale_h);
     od_results->results[last_count].prop = obj_conf;
     od_results->results[last_count].cls_id = id;
     last_count++;
@@ -1488,13 +1488,13 @@ int post_process(rknn_app_context_t *app_ctx, rknn_output *outputs,
     float obj_conf = objProbs[i];
 
     od_results->results[last_count].box.left =
-        (int)(clamp(x1, 0, model_in_w) / letter_box->scale);
+        (int)(clamp(x1, 0, model_in_w) / letter_box->scale_w);
     od_results->results[last_count].box.top =
-        (int)(clamp(y1, 0, model_in_h) / letter_box->scale);
+        (int)(clamp(y1, 0, model_in_h) / letter_box->scale_h);
     od_results->results[last_count].box.right =
-        (int)(clamp(x2, 0, model_in_w) / letter_box->scale);
+        (int)(clamp(x2, 0, model_in_w) / letter_box->scale_w);
     od_results->results[last_count].box.bottom =
-        (int)(clamp(y2, 0, model_in_h) / letter_box->scale);
+        (int)(clamp(y2, 0, model_in_h) / letter_box->scale_h);
     od_results->results[last_count].prop = obj_conf;
     od_results->results[last_count].cls_id = id;
     last_count++;
@@ -1594,10 +1594,10 @@ int post_process_obb(rknn_app_context_t *app_ctx, rknn_output *outputs,
     //        (int)(clamp(w, 0, model_in_w) / letter_box->scale);
     //    od_results->results_obb[last_count].box.h =
     //        (int)(clamp(h, 0, model_in_h) / letter_box->scale);
-    od_results->results_obb[last_count].box.x = (int)(x / letter_box->scale);
-    od_results->results_obb[last_count].box.y = (int)(y / letter_box->scale);
-    od_results->results_obb[last_count].box.w = (int)(w / letter_box->scale);
-    od_results->results_obb[last_count].box.h = (int)(h / letter_box->scale);
+    od_results->results_obb[last_count].box.x = (int)(x / letter_box->scale_w);
+    od_results->results_obb[last_count].box.y = (int)(y / letter_box->scale_h);
+    od_results->results_obb[last_count].box.w = (int)(w / letter_box->scale_w);
+    od_results->results_obb[last_count].box.h = (int)(h / letter_box->scale_h);
     od_results->results_obb[last_count].box.theta = theta;
     //    od_results->results_obb[last_count].box.theta = 0;
     od_results->results_obb[last_count].prop = obj_conf;
