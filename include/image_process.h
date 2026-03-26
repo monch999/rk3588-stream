@@ -5,9 +5,10 @@
 
 class ImageProcess {
 public:
-  ImageProcess(int width, int height, int target_size, float framerate);
+  // target_w / target_h: 模型输入宽高 (如 640×384)，直接 resize 不做 letterbox
+  ImageProcess(int src_w, int src_h, int target_w, int target_h);
 
-  // Letterbox resize + BGR→RGB，输出直接是 RGB 格式，可直接送入 RKNN
+  // RGA 硬件加速 resize + BGR→RGB，输出 target_w × target_h RGB 图
   std::unique_ptr<cv::Mat> Convert(const cv::Mat &src);
 
   const letterbox_t &get_letter_box();
@@ -21,11 +22,7 @@ private:
   void ProcessPoseImage(cv::Mat &image,
                         object_detect_result_list &od_results) const;
 
-  double scale_;
-  int padding_x_;
-  int padding_y_;
-  int new_width_;
-  int new_height_;
-  int target_size_;
+  int target_w_;
+  int target_h_;
   letterbox_t letterbox_;
 };

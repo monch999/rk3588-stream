@@ -54,6 +54,10 @@ public:
     std::string bitrate = "4M";
     bool loop_video     = false;
 
+    // 推流模式: 控制是否推原始流和/或处理后的流
+    bool enable_raw       = true;   // 推原始流
+    bool enable_processed = true;   // 推处理后的流
+
     SharedClock      *clock     = nullptr;  // 共享时钟 (外部持有)
     IFrameProcessor  *processor = nullptr;  // 帧处理器 (外部持有, 可为 null)
   };
@@ -79,6 +83,7 @@ private:
   Config cfg_;
   int frame_w_ = 0, frame_h_ = 0;
   int skip_ratio_ = 1;               // raw_fps / processed_fps (帧抽取比)
+  bool need_process_ = false;         // 是否需要处理管线
   std::atomic<bool> running_{false};
 
   // 视频读取

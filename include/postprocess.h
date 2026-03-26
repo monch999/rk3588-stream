@@ -22,11 +22,12 @@ enum class ModelType {
   V10_DETECTION,
 };
 
-// ==================== Letterbox 参数 ====================
+// ==================== 坐标映射参数 ====================
 typedef struct {
-  double scale;
-  int x_pad;
-  int y_pad;
+  double scale_w;   // 宽度缩放因子: target_w / src_w
+  double scale_h;   // 高度缩放因子: target_h / src_h
+  int x_pad;        // x 方向填充 (无 letterbox 时为 0)
+  int y_pad;        // y 方向填充 (无 letterbox 时为 0)
 } letterbox_t;
 
 // ==================== 检测框 ====================

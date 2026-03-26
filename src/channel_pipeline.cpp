@@ -13,17 +13,24 @@ ChannelPipeline::ChannelPipeline(const Config &cfg) : cfg_(cfg) {
   skip_ratio_ = std::max(1, static_cast<int>(
       std::round(cfg_.raw_fps / cfg_.processed_fps)));
 
-  printf("[%-6s] Init OK: %dx%d, raw=%.0ffps, proc=%.0ffps, skip=%d\n",
+  // 是否实际需要处理管线
+  need_process_ = cfg_.enable_processed && cfg_.processor != nullptr;
+
+  printf("[%-6s] Init OK: %dx%d, raw=%.0ffps, proc=%.0ffps, skip=%d, "
+         "mode=%s%s%s\n",
          cfg_.name.c_str(), frame_w_, frame_h_,
-         cfg_.raw_fps, cfg_.processed_fps, skip_ratio_);
+         cfg_.raw_fps, cfg_.processed_fps, skip_ratio_,
+         cfg_.enable_raw ? "raw" : "",
+         (cfg_.enable_raw && need_process_) ? "+" : "",
+         need_process_ ? "processed" : "");
 }
 
 ChannelPipeline::~ChannelPipeline() { Stop(); }
 
 // ==================== 启动 ====================
 void ChannelPipeline::Start() {
-  // 打开原始推流
-  {
+  // 打开原始推流器
+  if (cfg_.enable_raw) {
     StreamConfig sc;
     sc.rtsp_url = cfg_.raw_rtsp_url;
     sc.rtmp_url = cfg_.raw_rtmp_url;
@@ -39,8 +46,8 @@ void ChannelPipeline::Start() {
     }
   }
 
-  // 打开处理后推流
-  if (cfg_.processor) {
+  // 打开处理后推流器
+  if (need_process_) {
     StreamConfig sc;
     sc.rtsp_url = cfg_.processed_rtsp_url;
     sc.rtmp_url = cfg_.processed_rtmp_url;
@@ -60,10 +67,12 @@ void ChannelPipeline::Start() {
   running_ = true;
 
   // 启动线程
-  reader_thread_     = std::thread(&ChannelPipeline::ReaderLoop, this);
-  raw_writer_thread_ = std::thread(&ChannelPipeline::RawWriterLoop, this);
+  reader_thread_ = std::thread(&ChannelPipeline::ReaderLoop, this);
 
-  if (cfg_.processor) {
+  if (cfg_.enable_raw)
+    raw_writer_thread_ = std::thread(&ChannelPipeline::RawWriterLoop, this);
+
+  if (need_process_) {
     int nw = cfg_.processor->NumWorkers();
     for (int i = 0; i < nw; i++)
       process_threads_.emplace_back(
@@ -71,11 +80,11 @@ void ChannelPipeline::Start() {
     processed_writer_thread_ =
         std::thread(&ChannelPipeline::ProcessedWriterLoop, this);
 
-    printf("[%-6s] Started: reader(1) + raw_writer(1) + "
-           "process(%d) + proc_writer(1)\n",
-           cfg_.name.c_str(), nw);
-  } else {
-    printf("[%-6s] Started: reader(1) + raw_writer(1) (no processor)\n",
+    printf("[%-6s] Started: reader(1)%s + process(%d) + proc_writer(1)\n",
+           cfg_.name.c_str(),
+           cfg_.enable_raw ? " + raw_writer(1)" : "", nw);
+  } else if (cfg_.enable_raw) {
+    printf("[%-6s] Started: reader(1) + raw_writer(1) (raw only)\n",
            cfg_.name.c_str());
   }
 }
@@ -103,7 +112,6 @@ void ChannelPipeline::Stop() {
 }
 
 // ==================== Reader: 读帧 + 分发 ====================
-// 读取视频帧，分配 PTS，分发到 raw 队列和 process 队列
 void ChannelPipeline::ReaderLoop() {
   int64_t seq      = 0;
   int64_t proc_seq = 0;
@@ -124,11 +132,13 @@ void ChannelPipeline::ReaderLoop() {
     auto shared_frame = std::shared_ptr<cv::Mat>(std::move(frame));
 
     // 送入 raw 推流队列
-    TimestampedFrame raw_tf{seq, pts, shared_frame};
-    if (!raw_queue_.push(std::move(raw_tf))) break;
+    if (cfg_.enable_raw) {
+      TimestampedFrame raw_tf{seq, pts, shared_frame};
+      if (!raw_queue_.push(std::move(raw_tf))) break;
+    }
 
-    // 每 skip_ratio_ 帧送一帧给处理管线
-    if (cfg_.processor && (seq % skip_ratio_ == 0)) {
+    // 每 skip_ratio_ 帧送一帧给处理管线 (仅当需要处理时)
+    if (need_process_ && (seq % skip_ratio_ == 0)) {
       TimestampedFrame proc_tf{proc_seq, pts, shared_frame};
       if (!process_input_queue_.push(std::move(proc_tf))) break;
       proc_seq++;
@@ -139,7 +149,6 @@ void ChannelPipeline::ReaderLoop() {
 }
 
 // ==================== RawWriter: 原始帧推流 ====================
-// 按 raw_fps 帧率节流，基于 SharedClock PTS 对齐
 void ChannelPipeline::RawWriterLoop() {
   while (true) {
     TimestampedFrame tf;
@@ -157,7 +166,6 @@ void ChannelPipeline::RawWriterLoop() {
 }
 
 // ==================== ProcessWorker: 算法处理 ====================
-// 多个 worker 可并行（如 RGB YOLO 使用多 NPU 核心）
 void ChannelPipeline::ProcessWorker(int worker_id) {
   while (true) {
     TimestampedFrame tf;
@@ -173,7 +181,6 @@ void ChannelPipeline::ProcessWorker(int worker_id) {
 }
 
 // ==================== ProcessedWriter: 处理结果推流 ====================
-// 带重排序缓冲（多 worker 可能乱序完成），按 PTS 节流输出
 void ChannelPipeline::ProcessedWriterLoop() {
   std::map<int64_t, TimestampedFrame> reorder_buf;
   int64_t next_seq = 0;
@@ -188,7 +195,6 @@ void ChannelPipeline::ProcessedWriterLoop() {
     while (reorder_buf.count(next_seq)) {
       auto &frame = reorder_buf[next_seq];
 
-      // 基于共享时钟的 PTS 进行帧率节流
       if (cfg_.clock)
         cfg_.clock->WaitUntilPts(frame.pts_ns);
 

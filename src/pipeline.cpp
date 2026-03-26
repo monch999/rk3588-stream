@@ -14,7 +14,7 @@ Pipeline::Pipeline(const Config &cfg) : cfg_(cfg) {
   frame_h_ = video_->get_frame_height();
 
   image_process_ = std::make_unique<ImageProcess>(
-      frame_w_, frame_h_, cfg_.model_input_size, cfg_.framerate);
+      frame_w_, frame_h_, cfg_.model_input_w, cfg_.model_input_h);
 
   // 初始化 RKNN 模型 (与原 RknnPool 逻辑相同)
   for (int i = 0; i < cfg_.infer_threads; i++)

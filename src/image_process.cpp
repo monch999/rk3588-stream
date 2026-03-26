@@ -11,29 +11,25 @@ static unsigned char class_colors[][3] = {
     {52, 69, 147},   {100, 115, 255}, {0, 24, 236},    {132, 56, 255},
     {82, 0, 133},    {203, 56, 255},  {255, 149, 200}, {255, 55, 199}};
 
-ImageProcess::ImageProcess(int width, int height, int target_size,
-                           float framerate) {
-  scale_ = static_cast<double>(target_size) / std::max(height, width);
-  padding_x_ = target_size - static_cast<int>(width * scale_);
-  padding_y_ = target_size - static_cast<int>(height * scale_);
-  new_width_ = static_cast<int>(width * scale_);
-  new_height_ = static_cast<int>(height * scale_);
-  target_size_ = target_size;
-  letterbox_.scale = scale_;
-  letterbox_.x_pad = padding_x_ / 2;
-  letterbox_.y_pad = padding_y_ / 2;
+ImageProcess::ImageProcess(int src_w, int src_h, int target_w, int target_h)
+    : target_w_(target_w), target_h_(target_h) {
+  // 直接 resize，不做 letterbox，使用独立的宽高缩放因子
+  letterbox_.scale_w = static_cast<double>(target_w) / src_w;
+  letterbox_.scale_h = static_cast<double>(target_h) / src_h;
+  letterbox_.x_pad   = 0;
+  letterbox_.y_pad   = 0;
 }
 
-// RGA 硬件加速: resize + BGR→RGB，再 CPU 做 letterbox 填充
+// RGA 硬件加速: resize(target_w × target_h) + BGR→RGB
 std::unique_ptr<cv::Mat> ImageProcess::Convert(const cv::Mat &src) {
   if (src.empty()) return nullptr;
 
-  // 1. RGA resize: src (BGR) → resized_bgr (BGR, new_width_ x new_height_)
-  cv::Mat resized_bgr(new_height_, new_width_, CV_8UC3);
+  // 1. RGA resize: src (BGR) → resized_bgr (BGR, target_w_ × target_h_)
+  cv::Mat resized_bgr(target_h_, target_w_, CV_8UC3);
   rga_buffer_t src_buf = wrapbuffer_virtualaddr(
       src.data, src.cols, src.rows, RK_FORMAT_BGR_888);
   rga_buffer_t resize_buf = wrapbuffer_virtualaddr(
-      resized_bgr.data, new_width_, new_height_, RK_FORMAT_BGR_888);
+      resized_bgr.data, target_w_, target_h_, RK_FORMAT_BGR_888);
 
   IM_STATUS status = imresize(src_buf, resize_buf);
   if (status != IM_STATUS_SUCCESS) {
@@ -42,9 +38,9 @@ std::unique_ptr<cv::Mat> ImageProcess::Convert(const cv::Mat &src) {
   }
 
   // 2. RGA cvtcolor: resized_bgr (BGR) → resized_rgb (RGB)
-  cv::Mat resized_rgb(new_height_, new_width_, CV_8UC3);
+  auto rgb_img = std::make_unique<cv::Mat>(target_h_, target_w_, CV_8UC3);
   rga_buffer_t rgb_buf = wrapbuffer_virtualaddr(
-      resized_rgb.data, new_width_, new_height_, RK_FORMAT_RGB_888);
+      rgb_img->data, target_w_, target_h_, RK_FORMAT_RGB_888);
 
   status = imcvtcolor(resize_buf, rgb_buf, RK_FORMAT_BGR_888, RK_FORMAT_RGB_888);
   if (status != IM_STATUS_SUCCESS) {
@@ -52,17 +48,7 @@ std::unique_ptr<cv::Mat> ImageProcess::Convert(const cv::Mat &src) {
     return nullptr;
   }
 
-  // 3. Letterbox: 创建 target_size x target_size 画布，填充灰色 (114,114,114)
-  auto square_img = std::make_unique<cv::Mat>(
-      target_size_, target_size_, CV_8UC3, cv::Scalar(114, 114, 114));
-
-  // 4. 将 RGB 结果拷贝到画布正确位置
-  int x_offset = padding_x_ / 2;
-  int y_offset = padding_y_ / 2;
-  resized_rgb.copyTo(
-      (*square_img)(cv::Rect(x_offset, y_offset, new_width_, new_height_)));
-
-  return square_img;
+  return rgb_img;
 }
 
 const letterbox_t &ImageProcess::get_letter_box() { return letterbox_; }
