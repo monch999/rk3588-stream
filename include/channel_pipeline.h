@@ -90,7 +90,7 @@ private:
   std::unique_ptr<VideoFile> video_;
 
   // 阶段间队列
-  BoundedQueue<TimestampedFrame> raw_queue_{16};
+  BoundedQueue<TimestampedFrame> raw_queue_{10};
   BoundedQueue<TimestampedFrame> process_input_queue_{8};
   BoundedQueue<TimestampedFrame> processed_queue_{8};
 
@@ -100,7 +100,6 @@ private:
 
   // 线程
   std::thread              reader_thread_;
-  std::thread              raw_writer_thread_;
   std::vector<std::thread> process_threads_;
   std::thread              processed_writer_thread_;
 
