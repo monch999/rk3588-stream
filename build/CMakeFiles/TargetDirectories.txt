@@ -1,0 +1,4 @@
+/home/Tronlong/project/rk3588-stream/build/CMakeFiles/edit_cache.dir
+/home/Tronlong/project/rk3588-stream/build/CMakeFiles/multi_stream.dir
+/home/Tronlong/project/rk3588-stream/build/CMakeFiles/rebuild_cache.dir
+/home/Tronlong/project/rk3588-stream/build/CMakeFiles/rk3588_yolo_detect.dir
