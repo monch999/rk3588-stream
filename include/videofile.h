@@ -5,6 +5,7 @@
 #include <rockchip/rk_mpi.h>
 #include <rockchip/mpp_buffer.h>
 #include "drm_frame.h"
+#include "video_source.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -12,7 +13,7 @@ extern "C" {
 #include <libavcodec/bsf.h>
 }
 
-class VideoFile {
+class VideoFile : public IVideoSource {
 public:
   explicit VideoFile(const std::string &path);
   ~VideoFile();
@@ -20,12 +21,12 @@ public:
   VideoFile(const VideoFile &) = delete;
   VideoFile &operator=(const VideoFile &) = delete;
 
-  std::shared_ptr<DrmFrame> GetNextDrmFrame();
+  std::shared_ptr<DrmFrame> GetNextDrmFrame() override;
   std::unique_ptr<cv::Mat> GetNextFrame();
 
-  int get_frame_width()  const { return width_; }
-  int get_frame_height() const { return height_; }
-  double get_fps()       const { return fps_; }
+  int get_frame_width()  const override { return width_; }
+  int get_frame_height() const override { return height_; }
+  double get_fps()       const override { return fps_; }
 
 private:
   bool InitDemuxer(const std::string &path);

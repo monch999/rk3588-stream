@@ -1,0 +1,6 @@
+{
+  "focal_min_mm": 5.1,
+  "focal_max_mm": 153.0,
+  "hfov_at_focal_min_deg": 55.27,
+  "vfov_at_focal_min_deg": 32.27
+}
