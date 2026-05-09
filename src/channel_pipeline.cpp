@@ -1,31 +1,52 @@
 #include "channel_pipeline.h"
 #include "algorithm_interface.h"
+#include "videofile.h"
+#include "v4l2_source.h"
+#include "thermal_source.h"
 #include "im2d.hpp"
 #include "RgaUtils.h"
 #include <cstdio>
 #include <chrono>
 #include <map>
 
+// ==================== 视频源工厂 ====================
+std::unique_ptr<IVideoSource> ChannelPipeline::CreateSource(
+    const std::string& spec, bool is_thermal) {
+  // 热红外 V4L2 设备
+  if (is_thermal && spec.rfind("/dev/video", 0) == 0)
+    return std::make_unique<ThermalSource>(spec);
+  // 普通 V4L2 设备: /dev/video0, /dev/video42 等
+  if (spec.rfind("/dev/video", 0) == 0)
+    return std::make_unique<V4l2Source>(spec);
+  // 文件 / rtsp:// / rtmp:// / udp:// / http:// → 走 FFmpeg 通用路径
+  return std::make_unique<VideoFile>(spec);
+}
+
 // ==================== 构造 / 析构 ====================
 ChannelPipeline::ChannelPipeline(const Config& cfg) : cfg_(cfg) {
   need_process_ = cfg_.enable_processed && cfg_.processor != nullptr;
+  is_v4l2_      = (cfg_.input_file.rfind("/dev/video", 0) == 0);
 
   if (need_process_) {
-    video_ = std::make_unique<VideoFile>(cfg_.input_file);
+    video_ = CreateSource(cfg_.input_file, cfg_.is_thermal);
     frame_w_ = video_->get_frame_width();
     frame_h_ = video_->get_frame_height();
     skip_ratio_ = std::max(1, static_cast<int>(
         std::round(cfg_.raw_fps / cfg_.processed_fps)));
   }
 
-  printf("[%-6s] Init OK: mode=%s\n", cfg_.name.c_str(),
-         need_process_ ? "Processed(zero-copy)" : "Raw-Only");
+  printf("[%-6s] Init OK: mode=%s source=%s\n",
+         cfg_.name.c_str(),
+         need_process_ ? "Processed(zero-copy)" : "Raw-Only",
+         is_v4l2_ ? "V4L2" : "FFmpeg");
 }
 
 ChannelPipeline::~ChannelPipeline() { Stop(); }
 
-// ==================== Decoder NV12 -> 自管 NV12 ====================
-// RGA 硬拷贝, decoder buffer 立即归还给 decoder pool
+// ==================== Source NV12 -> 自管 NV12 ====================
+// RGA 硬拷贝, source buffer 立即归还给来源池
+// 注: V4l2Source 内部已经 RGA 拷贝过一次, 这里属冗余拷贝, 但保持单一路径简化逻辑;
+//     RK3588 RGA 拷贝代价很低 (4K NV12 约 1ms 量级)
 std::shared_ptr<DrmFrame> ChannelPipeline::CopyToOwnedNv12(
     const std::shared_ptr<DrmFrame>& src) {
   if (!src || src->fd < 0) return nullptr;
@@ -103,9 +124,67 @@ std::shared_ptr<DrmFrame> ChannelPipeline::CopyToOwnedNv12(
 // ==================== 启动 ====================
 void ChannelPipeline::Start() {
   if (cfg_.enable_raw) {
+    // 热红外不能走 FFmpegStreamer 直推 (需要 crop + 格式转换)
+    // 改为: 创建 ThermalSource → 读帧 → encode → mux (无算法处理)
+    if (cfg_.is_thermal) {
+      if (!video_)
+        video_ = CreateSource(cfg_.input_file, true);
+      frame_w_ = video_->get_frame_width();
+      frame_h_ = video_->get_frame_height();
+      skip_ratio_ = 1;
+
+      // ---- Muxer ----
+      muxer_ = std::make_unique<RTSPMuxer>();
+      RTSPMuxer::Config mcfg;
+      mcfg.rtsp_url = cfg_.raw_rtsp_url;
+      mcfg.codec    = cfg_.codec;
+      mcfg.width    = frame_w_;
+      mcfg.height   = frame_h_;
+      mcfg.fps      = cfg_.raw_fps;
+      mcfg.bitrate  = cfg_.bitrate;
+      if (!muxer_->Open(mcfg)) {
+        fprintf(stderr, "[%-6s] Failed to open RTSPMuxer for thermal raw\n", cfg_.name.c_str());
+        return;
+      }
+
+      // ---- Encoder ----
+      encoder_ = std::make_unique<MppEncoder>();
+      MppEncoder::Config ecfg;
+      ecfg.width   = frame_w_;
+      ecfg.height  = frame_h_;
+      ecfg.fps     = cfg_.raw_fps;
+      ecfg.codec   = cfg_.codec;
+      ecfg.bitrate = cfg_.bitrate;
+      ecfg.gop     = static_cast<int>(cfg_.raw_fps);
+
+      auto* muxer_ptr = muxer_.get();
+      EncodedPacketCallback enc_cb = [muxer_ptr](const uint8_t* data, size_t size,
+                                                  int64_t pts, bool is_key) {
+        muxer_ptr->WritePacket(data, size, pts, is_key);
+      };
+
+      if (!encoder_->Open(ecfg, std::move(enc_cb))) {
+        fprintf(stderr, "[%-6s] Failed to open MppEncoder for thermal raw\n", cfg_.name.c_str());
+        muxer_->Close();
+        return;
+      }
+
+      running_ = true;
+      // reader → process(passthrough) → writer
+      reader_thread_ = std::thread(&ChannelPipeline::ReaderLoop, this);
+      process_threads_.emplace_back(&ChannelPipeline::ProcessWorker, this, 0);
+      processed_writer_thread_ = std::thread(&ChannelPipeline::ProcessedWriterLoop, this);
+
+      printf("[%-6s] Thermal Raw Pipeline Started: reader(1) + passthrough(1) + writer(1)\n",
+             cfg_.name.c_str());
+      return;
+    }
+
     StreamConfig sc;
     sc.rtsp_url = cfg_.raw_rtsp_url;
     sc.bitrate  = cfg_.bitrate;
+
+    // V4L2 的 raw 转发: 直接转发 V4L2 设备文件 ffmpeg 也支持
     if (!raw_streamer_.OpenDirect(cfg_.input_file, cfg_.raw_fps, sc, cfg_.loop_video)) {
       fprintf(stderr, "[%-6s] Failed to open direct raw streamer\n", cfg_.name.c_str());
     } else {
@@ -185,7 +264,7 @@ void ChannelPipeline::Stop() {
   if (muxer_)   muxer_->Close();
 }
 
-// ==================== Reader: 解码 + RGA copy + 入队 ====================
+// ==================== Reader: 取帧 + RGA copy + 入队 ====================
 void ChannelPipeline::ReaderLoop() {
   int64_t file_seq = 0;
   auto start_time = std::chrono::steady_clock::now();
@@ -194,10 +273,30 @@ void ChannelPipeline::ReaderLoop() {
   while (running_) {
     auto src_drm = video_->GetNextDrmFrame();
     if (!src_drm) {
+      if (is_v4l2_) {
+        // V4L2 实时源: nullptr 可能是 poll 超时 / SOURCE_CHANGE 重协商 / EAGAIN
+        // 不退出循环, 短暂休眠后重试. 重协商后 frame_w/h 可能已改变, 重新读取.
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        int new_w = video_->get_frame_width();
+        int new_h = video_->get_frame_height();
+        if (new_w > 0 && new_h > 0 && (new_w != frame_w_ || new_h != frame_h_)) {
+          fprintf(stderr,
+                  "[%-6s] V4L2 resolution changed: %dx%d -> %dx%d "
+                  "(encoder/muxer not adapting, may need restart)\n",
+                  cfg_.name.c_str(), frame_w_, frame_h_, new_w, new_h);
+          // 注: encoder/muxer 是按初始分辨率初始化的, 这里不能动态改尺寸
+          // 用户层面: 如果 HDMI 切换分辨率, 需要重启程序
+          frame_w_ = new_w;
+          frame_h_ = new_h;
+        }
+        continue;
+      }
+
+      // 文件来源: EOF, 走原有 loop_video 逻辑
       if (cfg_.loop_video) {
         video_.reset();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        video_ = std::make_unique<VideoFile>(cfg_.input_file);
+        video_ = CreateSource(cfg_.input_file, cfg_.is_thermal);
         file_seq = 0;
         start_time = std::chrono::steady_clock::now();
         printf("[%-6s] Loop restart\n", cfg_.name.c_str());
@@ -209,22 +308,24 @@ void ChannelPipeline::ReaderLoop() {
     // 跳帧 (按 raw_fps -> processed_fps 比例)
     if (file_seq % skip_ratio_ != 0) {
       file_seq++;
-      // src_drm 离开作用域, decoder buffer 立即归还
+      // src_drm 离开作用域, source buffer 立即归还
       continue;
     }
 
-    // 帧率节流
+    // 帧率节流 (V4L2 实时源不需要节流, 帧率由硬件决定; 但节流也无害)
     auto target = start_time + interval * file_seq;
     auto now = std::chrono::steady_clock::now();
     if (now > target + std::chrono::milliseconds(100)) {
       start_time = now - interval * file_seq;
       target = now;
     }
-    std::this_thread::sleep_until(target);
+    if (!is_v4l2_) {
+      std::this_thread::sleep_until(target);
+    }
 
-    // ★ 关键: RGA copy 到自管 NV12 buffer, decoder buffer 立即释放
+    // ★ 关键: RGA copy 到自管 NV12 buffer, source buffer 立即释放
     auto owned_nv12 = CopyToOwnedNv12(src_drm);
-    src_drm.reset();  // 显式释放 decoder frame (回归 decoder pool)
+    src_drm.reset();  // 显式释放 source frame
 
     if (!owned_nv12) {
       file_seq++;
@@ -247,7 +348,7 @@ void ChannelPipeline::ProcessWorker(int worker_id) {
     TimestampedFrame tf;
     if (!process_input_queue_.pop(tf)) break;
 
-    if (tf.frame) {
+    if (tf.frame && cfg_.processor) {
       // in-place 处理: 算法直接修改 frame 的 Y 平面
       bool ok = cfg_.processor->Process(worker_id, tf.frame);
       if (!ok) {

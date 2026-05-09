@@ -71,6 +71,26 @@ struct DrmFrame {
     return df;
   }
 
+  // ---- 来自外部 fd (V4L2 等), 析构时回调归还 buffer ----
+  using ReleaseFunc = std::function<void()>;
+  ReleaseFunc release_func_;
+
+  static std::shared_ptr<DrmFrame> FromExternalFd(
+      int fd, int w, int h, int h_stride, int v_stride,
+      Format fmt, ReleaseFunc release) {
+    if (fd < 0) return nullptr;
+    auto df       = std::make_shared<DrmFrame>();
+    df->fd        = fd;
+    df->width     = w;
+    df->height    = h;
+    df->h_stride  = h_stride;
+    df->v_stride  = v_stride;
+    df->format    = fmt;
+    df->release_func_ = std::move(release);
+    // 注: vaddr 为 nullptr, 不支持 CPU 直接读写; 需通过 RGA fd 路径使用
+    return df;
+  }
+
   // ---- cv::Mat 包装 (零拷贝, 仅供 CPU 访问) ----
   cv::Mat GetNV12Mat() const {
     if (!vaddr) return {};
@@ -89,14 +109,21 @@ struct DrmFrame {
   }
 
   // ---- Cache 同步 ----
-  void SyncEnd()   { if (owned_) owned_->SyncEnd(); }
-  void SyncBegin() { if (owned_) owned_->SyncBegin(); }
+  void SyncEnd() {
+    if (owned_) owned_->SyncEnd();
+    else if (mpp_buf) mpp_buffer_sync_end(mpp_buf);
+  }
+  void SyncBegin() {
+    if (owned_) owned_->SyncBegin();
+    else if (mpp_buf) mpp_buffer_sync_begin(mpp_buf);
+  }
 
   ~DrmFrame() {
     if (mpp_frm) {
       mpp_frame_deinit(&mpp_frm);
       mpp_frm = nullptr;
     }
+    if (release_func_) release_func_();
   }
 
   DrmFrame() = default;

@@ -12,7 +12,8 @@
 #include "mpp_encoder.h"
 #include "rtsp_muxer.h"
 #include "shared_clock.h"
-#include "videofile.h"
+#include "video_source.h"   // ★ 新增: IVideoSource 抽象
+#include "thermal_source.h" // ★ 热红外源
 
 class IFrameProcessor;
 
@@ -24,6 +25,10 @@ struct TimestampedFrame {
 };
 
 // ==================== 单通道推流流水线 (全链路 zero-copy) ====================
+// 视频源支持:
+//   - 文件路径 / RTSP URL  → VideoFile  (FFmpeg + MPP decoder)
+//   - /dev/videoN (V4L2)   → V4l2Source (HDMI-RX 等)
+// 由 input_file 字符串前缀自动识别
 class ChannelPipeline {
 public:
   struct Config {
@@ -43,6 +48,7 @@ public:
     bool enable_raw       = true;
     bool enable_processed = false;
     bool enable_display   = false;
+    bool is_thermal       = false;   // 热红外源 (走 ThermalSource)
 
     SharedClock      *clock     = nullptr;
     IFrameProcessor  *processor = nullptr;
@@ -54,10 +60,21 @@ public:
   void Start();
   void Stop();
 
+  // 视频源工厂: 根据 input_file 前缀和 is_thermal 决定类型
+  static std::unique_ptr<IVideoSource> CreateSource(const std::string& spec,
+                                                     bool is_thermal = false);
+
   int GetFrameWidth()      const { return frame_w_; }
   int GetFrameHeight()     const { return frame_h_; }
   int GetProcessedFrames() const { return processed_frames_.load(); }
   const std::string& GetName() const { return cfg_.name; }
+
+  // 查询热红外温度数据 (非热红外通道返回默认值)
+  ThermalData GetThermalData() const {
+    auto* ts = dynamic_cast<ThermalSource*>(video_.get());
+    if (ts) return ts->GetThermalData();
+    return ThermalData{};
+  }
 
   bool GetDisplayFrame(cv::Mat& out) {
     std::lock_guard<std::mutex> lk(display_mtx_);
@@ -71,19 +88,20 @@ private:
   void ProcessWorker(int worker_id);
   void ProcessedWriterLoop();
 
-  // decoder NV12 (来自 video_) -> 自管 NV12 DRM buffer (decoder buffer 立即释放)
+  // source NV12 → 自管 NV12 DRM buffer (source buffer 立即释放)
   std::shared_ptr<DrmFrame> CopyToOwnedNv12(const std::shared_ptr<DrmFrame>& src);
 
   Config cfg_;
   int frame_w_ = 0, frame_h_ = 0;
   int skip_ratio_ = 1;
   bool need_process_ = false;
+  bool is_v4l2_      = false;   // ★ 新增: V4L2 来源不支持 loop_video
   std::atomic<bool> running_{false};
 
   int64_t total_proc_seq_ = 0;
   int64_t next_seq_ = 0;
 
-  std::unique_ptr<VideoFile> video_;
+  std::unique_ptr<IVideoSource> video_;   // ★ 改类型: VideoFile → IVideoSource
 
   // 队列容量小: 防止 buffer 池占用过多
   BoundedQueue<TimestampedFrame> process_input_queue_{2};

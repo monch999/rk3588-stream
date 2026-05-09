@@ -1,0 +1,10 @@
+{
+  "initial_focal_mm": 5.1,
+  "zoom_in_threshold_ratio": 0.01,
+  "zoom_out_threshold_ratio": 0.25,
+  "zoom_step": 1.5,
+  "zoom_duration_ms": 5500,
+  "stable_frames_before_zoom": 15,
+  "post_zoom_cooldown_frames": 30,
+  "zoom_command_path": "../zoom_command.json"
+}

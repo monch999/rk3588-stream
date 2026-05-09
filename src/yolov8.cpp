@@ -1,9 +1,8 @@
 #include "yolov8.h"
-#include "utils.h"
 #include "postprocess.h"
 #include <cstdio>
 #include <cstring>
-#include <mutex> 
+#include <mutex>
 
 static const int RK3588_NPU_CORES = 3;
 
@@ -84,30 +83,20 @@ int Yolov8::Init(rknn_context *ctx_in, bool copy_weight) {
                sizeof(rknn_tensor_attr));
   }
 
-  // 获取输出属性并判断模型类型
+  // 获取输出属性
   rknn_tensor_attr *output_attrs =
       (rknn_tensor_attr *)calloc(io_num.n_output, sizeof(rknn_tensor_attr));
-
-  model_type_ = (io_num.n_output == 13) ? ModelType::SEGMENT
-                                        : ModelType::DETECTION;
   for (uint32_t i = 0; i < io_num.n_output; i++) {
     output_attrs[i].index = i;
     rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &output_attrs[i],
                sizeof(rknn_tensor_attr));
-    if (i == 2) {
-      if (strstr(output_attrs[i].name, "angle"))
-        model_type_ = ModelType::OBB;
-      if (strstr(output_attrs[i].name, "kpt"))
-        model_type_ = ModelType::POSE;
-      if (strstr(output_attrs[i].name, "yolov10"))
-        model_type_ = ModelType::V10_DETECTION;
-    }
   }
 
   // 填充 app context
   app_ctx_.rknn_ctx = ctx_;
-  app_ctx_.is_quant = (output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
-                       output_attrs[0].type == RKNN_TENSOR_INT8);
+  app_ctx_.is_quant =
+      (output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
+       output_attrs[0].type == RKNN_TENSOR_INT8);
   app_ctx_.io_num = io_num;
   app_ctx_.input_attrs =
       (rknn_tensor_attr *)malloc(io_num.n_input * sizeof(rknn_tensor_attr));
@@ -137,13 +126,13 @@ int Yolov8::Init(rknn_context *ctx_in, bool copy_weight) {
   inputs_[0].index = 0;
   inputs_[0].type = RKNN_TENSOR_UINT8;
   inputs_[0].fmt = RKNN_TENSOR_NHWC;
-  inputs_[0].size = app_ctx_.model_width * app_ctx_.model_height *
-                    app_ctx_.model_channel;
+  inputs_[0].size =
+      app_ctx_.model_width * app_ctx_.model_height * app_ctx_.model_channel;
   inputs_[0].buf = nullptr;
 
-  printf("[INFO ] Model loaded: %dx%d, type=%d, quant=%d\n",
+  printf("[INFO ] Model loaded: %dx%d, quant=%d, outputs=%d\n",
          app_ctx_.model_width, app_ctx_.model_height,
-         (int)model_type_, app_ctx_.is_quant);
+         app_ctx_.is_quant, io_num.n_output);
   return 0;
 }
 
@@ -183,23 +172,9 @@ int Yolov8::Inference(void *image_buf, object_detect_result_list *od_results,
   if (ret != RKNN_SUCC) return -1;
 
   memset(od_results, 0, sizeof(object_detect_result_list));
-  od_results->model_type = model_type_;
 
-  if (model_type_ == ModelType::SEGMENT) {
-    post_process_seg(&app_ctx_, outputs_.get(), &letter_box, BOX_THRESH,
-                     NMS_THRESH, od_results);
-  } else if (model_type_ == ModelType::DETECTION ||
-             model_type_ == ModelType::V10_DETECTION) {
-    post_process(&app_ctx_, outputs_.get(), &letter_box, BOX_THRESH,
-                 NMS_THRESH, od_results);
-  } else if (model_type_ == ModelType::OBB) {
-    post_process_obb(&app_ctx_, outputs_.get(), &letter_box, BOX_THRESH,
-                     NMS_THRESH, od_results);
-  } else if (model_type_ == ModelType::POSE) {
-    post_process_pose(&app_ctx_, outputs_.get(), &letter_box, BOX_THRESH,
-                      NMS_THRESH, od_results);
-  }
-  od_results->model_type = model_type_;
+  post_process(&app_ctx_, outputs_.get(), &letter_box, BOX_THRESH,
+               NMS_THRESH, od_results);
 
   rknn_outputs_release(app_ctx_.rknn_ctx, app_ctx_.io_num.n_output,
                        outputs_.get());

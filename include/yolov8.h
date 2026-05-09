@@ -22,7 +22,6 @@ private:
   std::string model_path_;
   rknn_context ctx_ = 0;
   rknn_app_context_t app_ctx_ = {};
-  ModelType model_type_ = ModelType::DETECTION;
   std::unique_ptr<rknn_input[]> inputs_;
   std::unique_ptr<rknn_output[]> outputs_;
 };
